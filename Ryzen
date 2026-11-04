@@ -1,0 +1,1502 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local LP = LocalPlayer
+local Camera = Workspace.CurrentCamera
+local genv = getgenv()
+
+-- clean previous runs (this build and the old UR build)
+for _, p in ipairs({"RW", "UR"}) do
+    if genv[p .. "_GUI"] then pcall(genv[p .. "_GUI"].Destroy) end
+    if genv[p .. "_EX"] then pcall(genv[p .. "_EX"].Unload) end
+    if genv[p .. "_AIM"] then pcall(genv[p .. "_AIM"].Unload) end
+    if genv[p .. "_ESP"] then pcall(genv[p .. "_ESP"].Unload) end
+end
+
+local ESP, AIM, EX
+local unloadAll
+
+-- ============================================================
+-- ESP
+-- ============================================================
+do
+    local Config = {
+        Enabled = true,
+        TeamCheck = true,
+        MaxDistance = 1500,
+        Box = true,
+        BoxFill = false,
+        Name = true,
+        Health = true,
+        Distance = true,
+        Tracer = true,
+        TracerOrigin = "Bottom", -- Bottom | Center | Top | Mouse
+        HeadDot = true,
+        Skeleton = true,
+        Chams = true,
+        VisibleCheck = true,
+        VisibleColor = Color3.fromRGB(255, 255, 255),
+        HiddenColor = Color3.fromRGB(255, 40, 40),
+        TeamColor = Color3.fromRGB(120, 120, 120),
+        Rainbow = false,
+        ToggleKey = Enum.KeyCode.RightShift,
+        UnloadKey = Enum.KeyCode.End,
+    }
+
+    local R15 = {
+        {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
+        {"UpperTorso","LeftUpperArm"},{"LeftUpperArm","LeftLowerArm"},{"LeftLowerArm","LeftHand"},
+        {"UpperTorso","RightUpperArm"},{"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"},
+        {"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},
+        {"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"},
+    }
+    local R6 = {
+        {"Head","Torso"},{"Torso","Left Arm"},{"Torso","Right Arm"},
+        {"Torso","Left Leg"},{"Torso","Right Leg"},
+    }
+
+    local function new(class, props)
+        local o = Drawing.new(class)
+        for k, v in pairs(props) do o[k] = v end
+        return o
+    end
+
+    local pool = {}
+    local connections = {}
+
+    local function makeEntry(plr)
+        local e = {
+            Box = new("Square", {Thickness = 1, Filled = false, Visible = false}),
+            Fill = new("Square", {Thickness = 1, Filled = true, Transparency = 0.15, Visible = false}),
+            Outline = new("Square", {Thickness = 3, Filled = false, Color = Color3.new(0,0,0), Visible = false}),
+            Name = new("Text", {Size = 13, Center = true, Outline = true, Font = 2, Visible = false}),
+            Dist = new("Text", {Size = 12, Center = true, Outline = true, Font = 2, Visible = false}),
+            HpBack = new("Line", {Thickness = 4, Color = Color3.new(0,0,0), Visible = false}),
+            Hp = new("Line", {Thickness = 2, Visible = false}),
+            Tracer = new("Line", {Thickness = 1, Visible = false}),
+            Head = new("Circle", {Thickness = 1, NumSides = 20, Filled = false, Visible = false}),
+            Bones = {},
+        }
+        for i = 1, 14 do e.Bones[i] = new("Line", {Thickness = 1, Visible = false}) end
+        pool[plr] = e
+    end
+
+    local function hide(e)
+        for k, v in pairs(e) do
+            if k == "Bones" then for _, b in ipairs(v) do b.Visible = false end
+            else v.Visible = false end
+        end
+    end
+
+    local function destroyEntry(plr)
+        local e = pool[plr]
+        if not e then return end
+        for k, v in pairs(e) do
+            if k == "Bones" then for _, b in ipairs(v) do b:Remove() end
+            else v:Remove() end
+        end
+        pool[plr] = nil
+        local h = plr:FindFirstChild("__rw_cham")
+        if h then h:Destroy() end
+    end
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local function isVisible(targetChar, part)
+        rayParams.FilterDescendantsInstances = {LocalPlayer.Character, targetChar}
+        local origin = Camera.CFrame.Position
+        return Workspace:Raycast(origin, part.Position - origin, rayParams) == nil
+    end
+
+    local function w2s(pos)
+        local v, on = Camera:WorldToViewportPoint(pos)
+        return Vector2.new(v.X, v.Y), on, v.Z
+    end
+
+    local function setChams(plr, char, color)
+        local h = plr:FindFirstChild("__rw_cham")
+        if not Config.Chams then
+            if h then h:Destroy() end
+            return
+        end
+        if not h then
+            h = Instance.new("Highlight")
+            h.Name = "__rw_cham"
+            h.FillTransparency = 0.6
+            h.OutlineTransparency = 0
+            h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            h.Parent = plr
+        end
+        h.Adornee = char
+        h.FillColor = color
+        h.OutlineColor = color
+    end
+
+    local function step()
+        Camera = Workspace.CurrentCamera
+        local screen = Camera.ViewportSize
+        local hue = (tick() % 5) / 5
+
+        for plr, e in pairs(pool) do
+            local char = plr.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            local head = char and char:FindFirstChild("Head")
+
+            if not (Config.Enabled and char and hum and root and head and hum.Health > 0) then
+                hide(e)
+                local c = plr:FindFirstChild("__rw_cham")
+                if c then c.Enabled = false end
+                continue
+            end
+
+            local isTeam = plr.Team ~= nil and plr.Team == LocalPlayer.Team
+            local dist = (Camera.CFrame.Position - root.Position).Magnitude
+            if (Config.TeamCheck and isTeam) or dist > Config.MaxDistance then
+                hide(e)
+                local c = plr:FindFirstChild("__rw_cham")
+                if c then c.Enabled = false end
+                continue
+            end
+
+            local color
+            if Config.Rainbow then
+                color = Color3.fromHSV(hue, 1, 1)
+            elseif isTeam then
+                color = Config.TeamColor
+            elseif Config.VisibleCheck then
+                color = isVisible(char, head) and Config.VisibleColor or Config.HiddenColor
+            else
+                color = Config.HiddenColor
+            end
+
+            setChams(plr, char, color)
+            local ch = plr:FindFirstChild("__rw_cham")
+            if ch then ch.Enabled = true end
+
+            local top, onTop, z1 = w2s(head.Position + Vector3.new(0, 0.6, 0))
+            local bot, onBot, z2 = w2s(root.Position - Vector3.new(0, 3, 0))
+
+            if not (onTop or onBot) or z1 < 0 or z2 < 0 then
+                hide(e)
+                continue
+            end
+
+            local height = math.abs(bot.Y - top.Y)
+            local width = height * 0.55
+            local cx = (top.X + bot.X) / 2
+            local pos = Vector2.new(cx - width / 2, top.Y)
+            local size = Vector2.new(width, height)
+
+            e.Outline.Visible = Config.Box
+            e.Box.Visible = Config.Box
+            e.Fill.Visible = Config.Box and Config.BoxFill
+            if Config.Box then
+                e.Outline.Position, e.Outline.Size = pos, size
+                e.Box.Position, e.Box.Size, e.Box.Color = pos, size, color
+                e.Fill.Position, e.Fill.Size, e.Fill.Color = pos, size, color
+            end
+
+            e.Name.Visible = Config.Name
+            if Config.Name then
+                e.Name.Text = plr.DisplayName
+                e.Name.Position = Vector2.new(cx, top.Y - 16)
+                e.Name.Color = color
+            end
+
+            e.Dist.Visible = Config.Distance
+            if Config.Distance then
+                e.Dist.Text = string.format("[%dm]", dist)
+                e.Dist.Position = Vector2.new(cx, bot.Y + 2)
+                e.Dist.Color = Color3.new(1, 1, 1)
+            end
+
+            e.Hp.Visible, e.HpBack.Visible = Config.Health, Config.Health
+            if Config.Health then
+                local pct = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                local x = pos.X - 5
+                e.HpBack.From = Vector2.new(x, pos.Y + height + 1)
+                e.HpBack.To = Vector2.new(x, pos.Y - 1)
+                e.Hp.From = Vector2.new(x, pos.Y + height)
+                e.Hp.To = Vector2.new(x, pos.Y + height - height * pct)
+                e.Hp.Color = Color3.fromHSV(pct * 0.33, 1, 1)
+            end
+
+            e.Tracer.Visible = Config.Tracer
+            if Config.Tracer then
+                local o = Config.TracerOrigin
+                local from =
+                    o == "Center" and screen / 2 or
+                    o == "Top" and Vector2.new(screen.X / 2, 0) or
+                    o == "Mouse" and UIS:GetMouseLocation() or
+                    Vector2.new(screen.X / 2, screen.Y)
+                e.Tracer.From = from
+                e.Tracer.To = Vector2.new(cx, bot.Y)
+                e.Tracer.Color = color
+            end
+
+            e.Head.Visible = Config.HeadDot
+            if Config.HeadDot then
+                local hp = w2s(head.Position)
+                e.Head.Position = hp
+                e.Head.Radius = math.clamp(height * 0.09, 2, 14)
+                e.Head.Color = color
+            end
+
+            local map = hum.RigType == Enum.HumanoidRigType.R15 and R15 or R6
+            for i, line in ipairs(e.Bones) do
+                local pair = map[i]
+                local a = pair and char:FindFirstChild(pair[1])
+                local b = pair and char:FindFirstChild(pair[2])
+                if Config.Skeleton and a and b then
+                    local pa, onA = w2s(a.Position)
+                    local pb, onB = w2s(b.Position)
+                    line.Visible = onA and onB
+                    line.From, line.To, line.Color = pa, pb, color
+                else
+                    line.Visible = false
+                end
+            end
+        end
+    end
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then makeEntry(p) end
+    end
+    table.insert(connections, Players.PlayerAdded:Connect(function(p)
+        if p ~= LocalPlayer then makeEntry(p) end
+    end))
+    table.insert(connections, Players.PlayerRemoving:Connect(destroyEntry))
+    table.insert(connections, RunService.RenderStepped:Connect(step))
+
+    local function Unload()
+        for _, c in ipairs(connections) do c:Disconnect() end
+        for plr in pairs(pool) do destroyEntry(plr) end
+        if genv.RW_ESP == ESP then genv.RW_ESP = nil end
+    end
+
+    table.insert(connections, UIS.InputBegan:Connect(function(i, gpe)
+        if gpe then return end
+        if i.KeyCode == Config.ToggleKey then
+            Config.Enabled = not Config.Enabled
+        elseif i.KeyCode == Config.UnloadKey then
+            Unload()
+        end
+    end))
+
+    ESP = {Config = Config, Unload = Unload}
+    genv.RW_ESP = ESP
+end
+
+-- ============================================================
+-- AIM / SILENT / TARGET LOCK / WALKSPEED
+-- ============================================================
+do
+    local Mouse = LP:GetMouse()
+
+    local Config = {
+        Aimbot = false,
+        AimKey = "RMB",          -- RMB | LMB | Shift | E | Q | Always
+        AimPart = "Head",        -- Head | Torso | Closest
+        Smoothness = 35,         -- 1 = snap, 100 = slow
+        AimFOV = 160,
+        ShowAimFOV = true,
+        Prediction = 0,
+        TargetLock = false,      -- hold one player until dead or key released
+
+        Silent = false,
+        SilentPart = "Head",     -- Head | Torso | Closest | Random
+        SilentFOV = 200,
+        ShowSilentFOV = true,
+        HitChance = 100,
+
+        TeamCheck = true,
+        WallCheck = true,
+        MaxDistance = 2000,
+
+        Walk = false,
+        WalkSpeed = 32,
+        WalkMode = "Property",   -- Property | CFrame
+    }
+
+    local State = {SilentPos = nil, SilentPart = nil, AimPart = nil, Locked = nil}
+    local A = {Config = Config, State = State}
+    local conns = {}
+
+    local function circle(color)
+        local c = Drawing.new("Circle")
+        c.Thickness, c.NumSides, c.Filled, c.Color, c.Visible = 1, 64, false, color, false
+        return c
+    end
+    local aimCircle = circle(Color3.fromRGB(255, 45, 45))
+    local silentCircle = circle(Color3.fromRGB(200, 200, 200))
+
+    local KEYS = {Shift = Enum.KeyCode.LeftShift, E = Enum.KeyCode.E, Q = Enum.KeyCode.Q}
+    local function held(k)
+        if k == "Always" then return true end
+        if k == "RMB" then return UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) end
+        if k == "LMB" then return UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) end
+        return KEYS[k] and UIS:IsKeyDown(KEYS[k]) or false
+    end
+
+    local NAMES = {
+        Head = {"Head"},
+        Torso = {"UpperTorso", "Torso", "HumanoidRootPart"},
+        Closest = {"Head", "UpperTorso", "Torso", "HumanoidRootPart", "LowerTorso"},
+    }
+    local RANDOM_POOL = {"Head", "UpperTorso", "Torso", "HumanoidRootPart", "LowerTorso"}
+    local randName, randAt = "Head", 0
+
+    local function candidates(char, mode)
+        if mode == "Random" then
+            if os.clock() - randAt > 0.2 then
+                randAt = os.clock()
+                randName = RANDOM_POOL[math.random(#RANDOM_POOL)]
+            end
+            local p = char:FindFirstChild(randName) or char:FindFirstChild("HumanoidRootPart")
+            return p and {p} or {}
+        end
+        local out = {}
+        for _, n in ipairs(NAMES[mode] or NAMES.Head) do
+            local p = char:FindFirstChild(n)
+            if p then
+                out[#out + 1] = p
+                if mode ~= "Closest" then break end
+            end
+        end
+        return out
+    end
+
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    local function visible(char, part)
+        rp.FilterDescendantsInstances = {LP.Character, char}
+        local o = Camera.CFrame.Position
+        return Workspace:Raycast(o, part.Position - o, rp) == nil
+    end
+
+    local function pick(radius, mode)
+        local mouse = UIS:GetMouseLocation()
+        local bestPart, bestD
+        for _, p in ipairs(Players:GetPlayers()) do
+            local char = p ~= LP and p.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 and not (Config.TeamCheck and p.Team ~= nil and p.Team == LP.Team) then
+                for _, part in ipairs(candidates(char, mode)) do
+                    local v, on = Camera:WorldToViewportPoint(part.Position)
+                    if on and v.Z > 0 then
+                        local d = (Vector2.new(v.X, v.Y) - mouse).Magnitude
+                        if d <= radius
+                            and (not bestD or d < bestD)
+                            and (Camera.CFrame.Position - part.Position).Magnitude <= Config.MaxDistance
+                            and (not Config.WallCheck or visible(char, part)) then
+                            bestPart, bestD = part, d
+                        end
+                    end
+                end
+            end
+        end
+        return bestPart
+    end
+
+    local function aimPoint(part)
+        return part.Position + part.AssemblyLinearVelocity * Config.Prediction
+    end
+
+    RunService:BindToRenderStep("RW_AIM_STEP", Enum.RenderPriority.Camera.Value + 1, function(dt)
+        Camera = Workspace.CurrentCamera
+        local mouse = UIS:GetMouseLocation()
+
+        aimCircle.Visible = Config.Aimbot and Config.ShowAimFOV
+        aimCircle.Position, aimCircle.Radius = mouse, Config.AimFOV
+        silentCircle.Visible = Config.Silent and Config.ShowSilentFOV
+        silentCircle.Position, silentCircle.Radius = mouse, Config.SilentFOV
+
+        State.SilentPos, State.SilentPart, State.AimPart = nil, nil, nil
+
+        if Config.Silent then
+            local part = pick(Config.SilentFOV, Config.SilentPart)
+            if part and math.random(1, 100) <= Config.HitChance then
+                State.SilentPart, State.SilentPos = part, aimPoint(part)
+            end
+        end
+
+        if Config.Aimbot and held(Config.AimKey) and not UIS:GetFocusedTextBox() then
+            local part
+            if Config.TargetLock and State.Locked then
+                local lc = State.Locked.Character
+                local lh = lc and lc:FindFirstChildOfClass("Humanoid")
+                if lh and lh.Health > 0 then
+                    part = candidates(lc, Config.AimPart)[1]
+                else
+                    State.Locked = nil
+                end
+            end
+            if not part then
+                part = pick(Config.AimFOV, Config.AimPart)
+                if part and Config.TargetLock then
+                    State.Locked = Players:GetPlayerFromCharacter(part.Parent)
+                end
+            end
+            if part then
+                State.AimPart = part
+                local cf = Camera.CFrame
+                local goal = CFrame.lookAt(cf.Position, aimPoint(part))
+                local k = math.clamp((101 - Config.Smoothness) / 100, 0.01, 1)
+                local alpha = 1 - (1 - k) ^ (dt * 60)
+                Camera.CFrame = cf:Lerp(goal, alpha)
+            end
+        else
+            State.Locked = nil
+        end
+    end)
+
+    -- walkspeed
+    local savedWS
+    local function restoreWS()
+        local ch = LP.Character
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        if hum and savedWS then hum.WalkSpeed = savedWS end
+        savedWS = nil
+    end
+    table.insert(conns, LP.CharacterAdded:Connect(function() savedWS = nil end))
+    table.insert(conns, RunService.Heartbeat:Connect(function(dt)
+        local ch = LP.Character
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        local root = ch and ch:FindFirstChild("HumanoidRootPart")
+        if not (hum and root) then return end
+        if Config.Walk then
+            if Config.WalkMode == "Property" then
+                if not savedWS then savedWS = hum.WalkSpeed end
+                if hum.WalkSpeed ~= Config.WalkSpeed then hum.WalkSpeed = Config.WalkSpeed end
+            else
+                if savedWS then restoreWS() end
+                local md = hum.MoveDirection
+                local extra = Config.WalkSpeed - hum.WalkSpeed
+                if md.Magnitude > 0 and extra > 0 then
+                    root.CFrame = root.CFrame + md * extra * dt
+                end
+            end
+        elseif savedWS then
+            restoreWS()
+        end
+    end))
+
+    -- silent aim hooks, installed once per executor session, gated by live config
+    if hookmetamethod and not genv.RW_AIM_HOOKED then
+        genv.RW_AIM_HOOKED = true
+
+        local oldNC
+        oldNC = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            local m = getnamecallmethod()
+            if self == Workspace then
+                local a = genv.RW_AIM
+                local pos = a and a.Config.Silent and a.State.SilentPos
+                if pos and not checkcaller() then
+                    if m == "Raycast" then
+                        local origin, dir = ...
+                        if typeof(origin) == "Vector3" and typeof(dir) == "Vector3" and dir.Magnitude > 0 then
+                            setnamecallmethod(m)
+                            return oldNC(self, origin, (pos - origin).Unit * dir.Magnitude, select(3, ...))
+                        end
+                    elseif m == "FindPartOnRay" or m == "FindPartOnRayWithIgnoreList" or m == "FindPartOnRayWithWhitelist" then
+                        local ray = ...
+                        if typeof(ray) == "Ray" and ray.Direction.Magnitude > 0 then
+                            setnamecallmethod(m)
+                            return oldNC(self, Ray.new(ray.Origin, (pos - ray.Origin).Unit * ray.Direction.Magnitude), select(2, ...))
+                        end
+                    end
+                end
+            end
+            return oldNC(self, ...)
+        end))
+
+        local oldIdx
+        oldIdx = hookmetamethod(game, "__index", newcclosure(function(self, k)
+            if self == Mouse and not checkcaller() then
+                local a = genv.RW_AIM
+                if a and a.Config.Silent and a.State.SilentPos then
+                    if k == "Hit" then return CFrame.new(a.State.SilentPos) end
+                    if k == "Target" then return a.State.SilentPart end
+                end
+            end
+            return oldIdx(self, k)
+        end))
+    end
+
+    function A.Unload()
+        pcall(function() RunService:UnbindFromRenderStep("RW_AIM_STEP") end)
+        for _, c in ipairs(conns) do c:Disconnect() end
+        pcall(restoreWS)
+        aimCircle:Remove()
+        silentCircle:Remove()
+        if genv.RW_AIM == A then genv.RW_AIM = nil end
+    end
+
+    AIM = A
+    genv.RW_AIM = A
+end
+
+-- ============================================================
+-- EXTRAS: no recoil, skins, triggerbot, jump, noclip, light, crosshair, fov
+-- ============================================================
+do
+    local baseFov = Workspace.CurrentCamera.FieldOfView
+
+    local Config = {
+        NoRecoil = false,
+        RecoilStrength = 85,
+
+        Skin = "Off",
+
+        Trigger = false,
+        TriggerDelay = 60,
+        TriggerTeamCheck = true,
+
+        InfJump = false,
+        Noclip = false,
+        Fullbright = false,
+
+        Crosshair = false,
+        CrosshairSize = 8,
+        CrosshairGap = 4,
+        CrosshairColor = "Red",
+        CrosshairDot = true,
+
+        FovOverride = false,
+        FovValue = math.floor(baseFov + 0.5),
+    }
+
+    local X = {
+        Config = Config,
+        SkinList = {"Off", "Neon Red", "Gold", "Ice", "Galaxy", "Void", "Rainbow"},
+        CrossList = {"Red", "White", "Cyan", "Green", "Yellow"},
+        BaseFov = baseFov,
+    }
+    local conns = {}
+    local function track(c) conns[#conns + 1] = c return c end
+
+    -- ---------- skins ----------
+    local SKINS = {
+        ["Neon Red"] = {Color3.fromRGB(255, 30, 30), Enum.Material.Neon, 0},
+        ["Gold"]     = {Color3.fromRGB(255, 200, 60), Enum.Material.Metal, 0.35},
+        ["Ice"]      = {Color3.fromRGB(150, 230, 255), Enum.Material.Glass, 0.2},
+        ["Galaxy"]   = {Color3.fromRGB(120, 40, 255), Enum.Material.ForceField, 0},
+        ["Void"]     = {Color3.fromRGB(8, 8, 8), Enum.Material.SmoothPlastic, 0.6},
+    }
+    local SKIP = {"arm$", "^arm", "hand$", "glove", "sleeve", "finger", "shirt"}
+    local function skippable(name)
+        name = name:lower()
+        for _, pat in ipairs(SKIP) do
+            if name:find(pat) then return true end
+        end
+        return false
+    end
+
+    local function gather()
+        local out = {}
+        local function scan(root)
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("BasePart") and not skippable(d.Name) then out[#out + 1] = d end
+            end
+        end
+        local ch = LP.Character
+        if ch then
+            for _, t in ipairs(ch:GetChildren()) do
+                if t:IsA("Tool") then scan(t) end
+            end
+        end
+        local cam = Workspace.CurrentCamera
+        if cam then
+            for _, c in ipairs(cam:GetChildren()) do
+                if c:IsA("Model") and not c:FindFirstChildOfClass("Humanoid") then scan(c) end
+            end
+        end
+        return out
+    end
+
+    local orig, stash = {}, {}
+    local function remember(p)
+        if orig[p] then return end
+        orig[p] = {
+            Color = p.Color, Material = p.Material, Reflectance = p.Reflectance,
+            Tex = p:IsA("MeshPart") and p.TextureID or nil,
+        }
+    end
+    local function restoreSkins()
+        for p, o in pairs(orig) do
+            if p.Parent then
+                p.Color, p.Material, p.Reflectance = o.Color, o.Material, o.Reflectance
+                if o.Tex ~= nil then pcall(function() p.TextureID = o.Tex end) end
+            end
+        end
+        for sa, par in pairs(stash) do
+            if par.Parent then sa.Parent = par end
+        end
+        orig, stash = {}, {}
+    end
+
+    -- ---------- fullbright ----------
+    local fbOrig
+    local function restoreLight()
+        if not fbOrig then return end
+        for k, v in pairs(fbOrig) do pcall(function() Lighting[k] = v end) end
+        fbOrig = nil
+    end
+
+    -- ---------- noclip ----------
+    local noclipped = {}
+    local function restoreNoclip()
+        for p in pairs(noclipped) do
+            if p.Parent then p.CanCollide = true end
+        end
+        noclipped = {}
+    end
+
+    -- ---------- crosshair ----------
+    local CROSS = {
+        Red = Color3.fromRGB(255, 45, 45), White = Color3.new(1, 1, 1),
+        Cyan = Color3.fromRGB(0, 225, 255), Green = Color3.fromRGB(60, 255, 90),
+        Yellow = Color3.fromRGB(255, 230, 60),
+    }
+    local cross = {}
+    for i = 1, 4 do
+        cross[i] = Drawing.new("Line")
+        cross[i].Thickness, cross[i].Visible = 1.5, false
+    end
+    local dot = Drawing.new("Circle")
+    dot.Filled, dot.Radius, dot.NumSides, dot.Visible = true, 1.5, 12, false
+    local DIRS = {Vector2.new(0, -1), Vector2.new(0, 1), Vector2.new(-1, 0), Vector2.new(1, 0)}
+
+    -- ---------- no recoil / crosshair / fov (after camera + aimbot) ----------
+    local lastPitch, userY, fovWas = nil, 0, false
+    track(UIS.InputChanged:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseMovement then userY += i.Delta.Y end
+    end))
+
+    RunService:BindToRenderStep("RW_EX_STEP", Enum.RenderPriority.Camera.Value + 3, function()
+        Camera = Workspace.CurrentCamera
+        local cam = Camera
+        if not cam then return end
+
+        -- fov
+        if Config.FovOverride then
+            cam.FieldOfView = Config.FovValue
+            fovWas = true
+        elseif fovWas then
+            cam.FieldOfView = baseFov
+            fovWas = false
+        end
+
+        -- recoil: cancel upward kick the player did not pull themselves
+        local pitch = math.asin(math.clamp(cam.CFrame.LookVector.Y, -1, 1))
+        if Config.NoRecoil and lastPitch and AIM.State.AimPart == nil
+            and UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+            local d = pitch - lastPitch
+            if d > 0.0004 and userY > -1 then
+                local comp = d * (Config.RecoilStrength / 100)
+                cam.CFrame = cam.CFrame * CFrame.Angles(-comp, 0, 0)
+                pitch -= comp
+            end
+        end
+        lastPitch, userY = pitch, 0
+
+        -- crosshair
+        local on = Config.Crosshair
+        local col = CROSS[Config.CrosshairColor] or CROSS.Red
+        local c = cam.ViewportSize / 2
+        local s, g = Config.CrosshairSize, Config.CrosshairGap
+        for i, d in ipairs(DIRS) do
+            local l = cross[i]
+            l.Visible, l.Color = on, col
+            l.From, l.To = c + d * g, c + d * (g + s)
+        end
+        dot.Visible = on and Config.CrosshairDot
+        dot.Position, dot.Color = c, col
+    end)
+
+    -- ---------- heartbeat: skins, fullbright, triggerbot ----------
+    local lastScan, lastShot = 0, 0
+    local trigParams = RaycastParams.new()
+    trigParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    track(RunService.Heartbeat:Connect(function()
+        local now = os.clock()
+
+        -- skins
+        if Config.Skin == "Off" then
+            if next(orig) or next(stash) then restoreSkins() end
+        else
+            if Config.Skin == "Rainbow" then
+                local col = Color3.fromHSV((now % 4) / 4, 1, 1)
+                for p in pairs(orig) do
+                    if p.Parent then p.Color = col end
+                end
+            end
+            if now - lastScan >= 0.25 then
+                lastScan = now
+                local preset = SKINS[Config.Skin]
+                for _, p in ipairs(gather()) do
+                    remember(p)
+                    local sa = p:FindFirstChildOfClass("SurfaceAppearance")
+                    if sa then stash[sa] = p sa.Parent = nil end
+                    if p:IsA("MeshPart") then pcall(function() p.TextureID = "" end) end
+                    if preset then
+                        p.Color, p.Material, p.Reflectance = preset[1], preset[2], preset[3]
+                    else
+                        p.Material, p.Reflectance = Enum.Material.Neon, 0
+                    end
+                end
+            end
+        end
+
+        -- fullbright
+        if Config.Fullbright then
+            if not fbOrig then
+                fbOrig = {
+                    Brightness = Lighting.Brightness, ClockTime = Lighting.ClockTime,
+                    FogEnd = Lighting.FogEnd, GlobalShadows = Lighting.GlobalShadows,
+                    Ambient = Lighting.Ambient, OutdoorAmbient = Lighting.OutdoorAmbient,
+                }
+            end
+            Lighting.Brightness = 2
+            Lighting.ClockTime = 14
+            Lighting.FogEnd = 1e6
+            Lighting.GlobalShadows = false
+            Lighting.Ambient = Color3.fromRGB(200, 200, 200)
+            Lighting.OutdoorAmbient = Color3.fromRGB(200, 200, 200)
+        elseif fbOrig then
+            restoreLight()
+        end
+
+        -- triggerbot
+        if Config.Trigger and Camera then
+            local ch = LP.Character
+            if ch then trigParams.FilterDescendantsInstances = {ch} end
+            local m = UIS:GetMouseLocation()
+            local ray = Camera:ViewportPointToRay(m.X, m.Y)
+            local hit = Workspace:Raycast(ray.Origin, ray.Direction * 2000, trigParams)
+            if hit then
+                local model = hit.Instance:FindFirstAncestorOfClass("Model")
+                local plr = model and Players:GetPlayerFromCharacter(model)
+                local hum = model and model:FindFirstChildOfClass("Humanoid")
+                if plr and plr ~= LP and hum and hum.Health > 0
+                    and not (Config.TriggerTeamCheck and plr.Team ~= nil and plr.Team == LP.Team)
+                    and now - lastShot >= Config.TriggerDelay / 1000 then
+                    lastShot = now
+                    task.spawn(function()
+                        if mouse1click then
+                            mouse1click()
+                        elseif mouse1press and mouse1release then
+                            mouse1press()
+                            task.wait(0.02)
+                            mouse1release()
+                        end
+                    end)
+                end
+            end
+        end
+    end))
+
+    -- ---------- noclip ----------
+    track(RunService.Stepped:Connect(function()
+        local ch = LP.Character
+        if Config.Noclip and ch then
+            for _, p in ipairs(ch:GetDescendants()) do
+                if p:IsA("BasePart") and p.CanCollide then
+                    noclipped[p] = true
+                    p.CanCollide = false
+                end
+            end
+        elseif next(noclipped) then
+            restoreNoclip()
+        end
+    end))
+
+    -- ---------- infinite jump ----------
+    track(UIS.JumpRequest:Connect(function()
+        if not Config.InfJump then return end
+        local ch = LP.Character
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end))
+
+    function X.Unload()
+        pcall(function() RunService:UnbindFromRenderStep("RW_EX_STEP") end)
+        for _, c in ipairs(conns) do c:Disconnect() end
+        pcall(restoreSkins)
+        pcall(restoreLight)
+        pcall(restoreNoclip)
+        for _, l in ipairs(cross) do l:Remove() end
+        dot:Remove()
+        local cam = Workspace.CurrentCamera
+        if fovWas and cam then cam.FieldOfView = baseFov end
+        if genv.RW_EX == X then genv.RW_EX = nil end
+    end
+
+    EX = X
+    genv.RW_EX = X
+end
+
+function unloadAll()
+    pcall(EX.Unload)
+    pcall(AIM.Unload)
+    pcall(ESP.Unload)
+    if genv.RW_GUI then pcall(genv.RW_GUI.Destroy) end
+end
+
+-- ============================================================
+-- GUI  (terminal skin)
+-- ============================================================
+do
+    local EC, AC, XC = ESP.Config, AIM.Config, EX.Config
+    local ui = {Watermark = true}
+
+    local RED = Color3.fromRGB(255, 45, 45)
+    local MID = Color3.fromRGB(170, 28, 28)
+    local DIM = Color3.fromRGB(80, 12, 12)
+    local BG = Color3.fromRGB(4, 0, 0)
+    local ROW = Color3.fromRGB(14, 2, 2)
+    local BLACK = Color3.new(0, 0, 0)
+    local FONT = Enum.Font.Code
+
+    local conns, refreshers = {}, {}
+    local function track(c) conns[#conns + 1] = c return c end
+
+    local function make(class, props, kids)
+        local o = Instance.new(class)
+        for k, v in pairs(props) do o[k] = v end
+        for _, c in ipairs(kids or {}) do c.Parent = o end
+        return o
+    end
+    local function label(props)
+        local d = {
+            BackgroundTransparency = 1, Font = FONT, TextSize = 14, TextColor3 = RED,
+            TextXAlignment = Enum.TextXAlignment.Left, Text = "",
+        }
+        for k, v in pairs(props) do d[k] = v end
+        return make("TextLabel", d)
+    end
+    local function stroke(color, th)
+        return make("UIStroke", {Color = color, Thickness = th or 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
+    end
+
+    local gui = make("ScreenGui", {
+        Name = "RW_Panel", ResetOnSpawn = false, IgnoreGuiInset = true,
+        DisplayOrder = 999, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    })
+    pcall(function() if syn and syn.protect_gui then syn.protect_gui(gui) end end)
+    gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+
+    local FULL = UDim2.fromOffset(360, 520)
+    local HEAD = 26
+    local root = make("Frame", {
+        Name = "Root", Size = UDim2.fromOffset(360, 0), Position = UDim2.fromOffset(40, 140),
+        BackgroundColor3 = BG, BorderSizePixel = 0, ClipsDescendants = true, Parent = gui,
+    }, {stroke(RED, 1)})
+
+    -- header
+    local bar = make("Frame", {
+        Size = UDim2.new(1, 0, 0, HEAD), BackgroundColor3 = RED, BorderSizePixel = 0, Parent = root,
+    })
+    local title = label({
+        Size = UDim2.new(1, -40, 1, 0), Position = UDim2.fromOffset(8, 0),
+        Text = "ryzeware@urban-reload:~$ _", TextColor3 = BG, Parent = bar,
+    })
+    local minBtn = make("TextButton", {
+        Size = UDim2.fromOffset(30, HEAD), Position = UDim2.new(1, -30, 0, 0), BackgroundTransparency = 1,
+        Text = "[-]", Font = FONT, TextSize = 14, TextColor3 = BG, Parent = bar,
+    })
+
+    -- layout frames
+    local tabBar = make("Frame", {
+        Size = UDim2.new(1, -12, 0, 24), Position = UDim2.fromOffset(6, HEAD + 4),
+        BackgroundTransparency = 1, Parent = root,
+    })
+    local area = make("Frame", {
+        Size = UDim2.new(1, -12, 1, -(HEAD + 34 + 94)), Position = UDim2.fromOffset(6, HEAD + 34),
+        BackgroundTransparency = 1, ClipsDescendants = true, Parent = root,
+    })
+    local logBox = make("Frame", {
+        Size = UDim2.new(1, -12, 0, 66), Position = UDim2.new(0, 6, 1, -88),
+        BackgroundColor3 = BLACK, BorderSizePixel = 0, ClipsDescendants = true, Parent = root,
+    }, {stroke(DIM)})
+    local logText = label({
+        Size = UDim2.new(1, -8, 1, -4), Position = UDim2.fromOffset(4, 2), TextSize = 12,
+        TextYAlignment = Enum.TextYAlignment.Bottom, TextColor3 = MID, Parent = logBox,
+    })
+    local footer = label({
+        Size = UDim2.new(1, -12, 0, 14), Position = UDim2.new(0, 6, 1, -18), TextSize = 11, TextColor3 = DIM,
+        Text = "INSERT hide | RSHIFT esp | F6 save cfg | DEL panic", Parent = root,
+    })
+
+    local lines = {}
+    local function log(s)
+        lines[#lines + 1] = "> " .. s
+        if #lines > 4 then table.remove(lines, 1) end
+        logText.Text = table.concat(lines, "\n")
+    end
+
+    -- scan band
+    local scan = make("Frame", {
+        Size = UDim2.new(1, 0, 0, 36), Position = UDim2.new(0, 0, 0, -36),
+        BackgroundColor3 = RED, BackgroundTransparency = 0.9, BorderSizePixel = 0, ZIndex = 10, Parent = root,
+    }, {make("UIGradient", {
+        Rotation = 90,
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 1),
+            NumberSequenceKeypoint.new(0.5, 0),
+            NumberSequenceKeypoint.new(1, 1),
+        }),
+    })})
+    TweenService:Create(scan, TweenInfo.new(3.4, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1),
+        {Position = UDim2.new(0, 0, 1, 0)}):Play()
+
+    -- pages and tabs
+    local tabNames = {"AIM", "ESP", "MOVE", "GUN", "VIS", "CFG"}
+    local nTabs = #tabNames
+    local pages, counters, tabBtns = {}, {}, {}
+    for _, n in ipairs(tabNames) do
+        local p = make("ScrollingFrame", {
+            Name = n, Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
+            ScrollBarThickness = 2, ScrollBarImageColor3 = RED, AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            CanvasSize = UDim2.new(), Visible = false, Parent = area,
+        }, {
+            make("UIListLayout", {Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder}),
+            make("UIPadding", {PaddingBottom = UDim.new(0, 4), PaddingRight = UDim.new(0, 4)}),
+        })
+        pages[n] = p
+        counters[p] = 0
+    end
+    local function nextOrder(p) counters[p] += 1 return counters[p] end
+
+    local function selectTab(name)
+        for _, n in ipairs(tabNames) do
+            local on = n == name
+            pages[n].Visible = on
+            tabBtns[n].BackgroundTransparency = on and 0 or 1
+            tabBtns[n].BackgroundColor3 = RED
+            tabBtns[n].TextColor3 = on and BG or MID
+        end
+        log("tab " .. string.lower(name))
+    end
+    for i, n in ipairs(tabNames) do
+        local b = make("TextButton", {
+            Size = UDim2.new(1 / nTabs, -3, 1, 0), Position = UDim2.new((i - 1) / nTabs, 0, 0, 0),
+            BackgroundTransparency = 1, Text = "[" .. n .. "]", Font = FONT, TextSize = 13,
+            TextColor3 = MID, AutoButtonColor = false, Parent = tabBar,
+        }, {stroke(DIM)})
+        b.MouseButton1Click:Connect(function() selectTab(n) end)
+        tabBtns[n] = b
+    end
+
+    -- widgets
+    local function rowFrame(page, h)
+        local row = make("Frame", {
+            Size = UDim2.new(1, -8, 0, h), BackgroundColor3 = ROW, BorderSizePixel = 0,
+            LayoutOrder = nextOrder(page), Parent = page,
+        })
+        local s = stroke(DIM)
+        s.Parent = row
+        return row, s
+    end
+    local function hover(btn, s)
+        btn.MouseEnter:Connect(function() s.Color = RED end)
+        btn.MouseLeave:Connect(function() s.Color = DIM end)
+    end
+    local function section(page, text)
+        label({
+            Size = UDim2.new(1, -8, 0, 18), Text = "# " .. text .. " " .. string.rep("-", 40),
+            TextColor3 = MID, TextSize = 12, ClipsDescendants = true,
+            LayoutOrder = nextOrder(page), Parent = page,
+        })
+    end
+    local function fmtValue(fmt, v)
+        local ok, s = pcall(string.format, fmt or "%d", v)
+        return ok and s or tostring(v)
+    end
+
+    local function toggle(page, text, get, set)
+        local row, s = rowFrame(page, 24)
+        local lbl = label({Size = UDim2.new(1, -64, 1, 0), Position = UDim2.fromOffset(8, 0), Text = "> " .. text, Parent = row})
+        local st = label({
+            Size = UDim2.fromOffset(52, 24), Position = UDim2.new(1, -58, 0, 0),
+            TextXAlignment = Enum.TextXAlignment.Right, Parent = row,
+        })
+        local btn = make("TextButton", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", Parent = row})
+        hover(btn, s)
+        local last
+        local function render()
+            local on = get() and true or false
+            last = on
+            st.Text = on and "[ON]" or "[OFF]"
+            st.TextColor3 = on and RED or DIM
+            lbl.TextColor3 = on and RED or MID
+        end
+        btn.MouseButton1Click:Connect(function()
+            local v = not get()
+            set(v)
+            render()
+            log(string.lower(text) .. " -> " .. (v and "on" or "off"))
+        end)
+        refreshers[#refreshers + 1] = function() if (get() and true or false) ~= last then render() end end
+        render()
+    end
+
+    local function slider(page, text, min, max, step, get, set, fmt)
+        local row, s = rowFrame(page, 40)
+        label({Size = UDim2.new(1, -90, 0, 20), Position = UDim2.fromOffset(8, 2), Text = "> " .. text, Parent = row})
+        local val = label({
+            Size = UDim2.fromOffset(80, 20), Position = UDim2.new(1, -88, 0, 2),
+            TextXAlignment = Enum.TextXAlignment.Right, Parent = row,
+        })
+        local barF = make("Frame", {
+            Size = UDim2.new(1, -16, 0, 8), Position = UDim2.fromOffset(8, 26),
+            BackgroundColor3 = BLACK, BorderSizePixel = 0, Parent = row,
+        }, {stroke(DIM)})
+        local fill = make("Frame", {
+            Size = UDim2.fromScale(0, 1), BackgroundColor3 = RED, BorderSizePixel = 0, Parent = barF,
+        })
+
+        local lastV
+        local function paint(v)
+            fill.Size = UDim2.fromScale(math.clamp((v - min) / (max - min), 0, 1), 1)
+            val.Text = fmtValue(fmt, v)
+        end
+        local function setValue(v)
+            v = math.clamp(math.floor(v / step + 0.5) * step, min, max)
+            lastV = v
+            paint(v)
+            set(v)
+        end
+        local function fromX(x)
+            setValue(min + math.clamp((x - barF.AbsolutePosition.X) / barF.AbsoluteSize.X, 0, 1) * (max - min))
+        end
+        local dragging = false
+        local hit = make("TextButton", {
+            Size = UDim2.new(1, -16, 0, 20), Position = UDim2.fromOffset(8, 20),
+            BackgroundTransparency = 1, Text = "", Parent = row,
+        })
+        hover(hit, s)
+        hit.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                fromX(i.Position.X)
+            end
+        end)
+        track(UIS.InputChanged:Connect(function(i)
+            if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+                fromX(i.Position.X)
+            end
+        end))
+        track(UIS.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                dragging = false
+            end
+        end))
+        refreshers[#refreshers + 1] = function()
+            local cur = get()
+            if cur ~= lastV then lastV = cur paint(cur) end
+        end
+        lastV = get()
+        paint(lastV)
+    end
+
+    local function cycler(page, text, get, set, list)
+        local row, s = rowFrame(page, 24)
+        label({Size = UDim2.new(1, -140, 1, 0), Position = UDim2.fromOffset(8, 0), Text = "> " .. text, Parent = row})
+        local val = label({
+            Size = UDim2.fromOffset(130, 24), Position = UDim2.new(1, -136, 0, 0),
+            TextXAlignment = Enum.TextXAlignment.Right, Parent = row,
+        })
+        local btn = make("TextButton", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", Parent = row})
+        hover(btn, s)
+        local last
+        local function paint() last = get() val.Text = "< " .. tostring(last) .. " >" end
+        btn.MouseButton1Click:Connect(function()
+            local v = list[(table.find(list, get()) or 0) % #list + 1]
+            set(v)
+            paint()
+            log(string.lower(text) .. " = " .. string.lower(tostring(v)))
+        end)
+        refreshers[#refreshers + 1] = function() if get() ~= last then paint() end end
+        paint()
+    end
+
+    local function buttonRow(page, defs)
+        local row = make("Frame", {
+            Size = UDim2.new(1, -8, 0, 28), BackgroundTransparency = 1,
+            LayoutOrder = nextOrder(page), Parent = page,
+        })
+        local n = #defs
+        for i, d in ipairs(defs) do
+            local b = make("TextButton", {
+                Size = UDim2.new(1 / n, -3, 1, 0), Position = UDim2.new((i - 1) / n, 0, 0, 0),
+                BackgroundColor3 = BLACK, Text = "[ " .. d[1] .. " ]", Font = FONT, TextSize = 13,
+                TextColor3 = RED, AutoButtonColor = false, Parent = row,
+            }, {stroke(RED)})
+            b.MouseEnter:Connect(function() b.BackgroundColor3, b.TextColor3 = RED, BG end)
+            b.MouseLeave:Connect(function() b.BackgroundColor3, b.TextColor3 = BLACK, RED end)
+            b.MouseButton1Click:Connect(d[2])
+        end
+    end
+
+    local function cfgToggle(page, text, cfg, key)
+        toggle(page, text, function() return cfg[key] end, function(v) cfg[key] = v end)
+    end
+    local function cfgSlider(page, text, cfg, key, min, max, step, fmt)
+        slider(page, text, min, max, step, function() return cfg[key] end, function(v) cfg[key] = v end, fmt)
+    end
+    local function cfgCycler(page, text, cfg, key, list)
+        cycler(page, text, function() return cfg[key] end, function(v) cfg[key] = v end, list)
+    end
+
+    -- AIM
+    local P = pages.AIM
+    section(P, "AIMBOT")
+    cfgToggle(P, "Aimbot", AC, "Aimbot")
+    cfgSlider(P, "Smoothness", AC, "Smoothness", 1, 100, 1, "%d")
+    cfgSlider(P, "Aim FOV", AC, "AimFOV", 20, 600, 1, "%dpx")
+    cfgCycler(P, "Aim Key", AC, "AimKey", {"RMB", "LMB", "Shift", "E", "Q", "Always"})
+    cfgCycler(P, "Aim Part", AC, "AimPart", {"Head", "Torso", "Closest"})
+    cfgToggle(P, "Target Lock", AC, "TargetLock")
+    cfgSlider(P, "Prediction", AC, "Prediction", 0, 0.3, 0.01, "%.2f")
+    cfgToggle(P, "Show Aim FOV", AC, "ShowAimFOV")
+    section(P, "SILENT AIM")
+    cfgToggle(P, "Silent Aim", AC, "Silent")
+    cfgSlider(P, "Silent FOV", AC, "SilentFOV", 20, 800, 1, "%dpx")
+    cfgSlider(P, "Hit Chance", AC, "HitChance", 1, 100, 1, "%d%%")
+    cfgCycler(P, "Silent Part", AC, "SilentPart", {"Head", "Torso", "Closest", "Random"})
+    cfgToggle(P, "Show Silent FOV", AC, "ShowSilentFOV")
+    section(P, "TARGETING")
+    cfgToggle(P, "Team Check", AC, "TeamCheck")
+    cfgToggle(P, "Wall Check", AC, "WallCheck")
+    cfgSlider(P, "Max Distance", AC, "MaxDistance", 100, 3000, 10, "%dm")
+
+    -- ESP
+    P = pages.ESP
+    section(P, "OVERLAY")
+    cfgToggle(P, "ESP Enabled", EC, "Enabled")
+    cfgSlider(P, "Max Distance", EC, "MaxDistance", 100, 3000, 10, "%dm")
+    cfgToggle(P, "Boxes", EC, "Box")
+    cfgToggle(P, "Box Fill", EC, "BoxFill")
+    cfgToggle(P, "Names", EC, "Name")
+    cfgToggle(P, "Health Bar", EC, "Health")
+    cfgToggle(P, "Distance", EC, "Distance")
+    cfgToggle(P, "Tracers", EC, "Tracer")
+    cfgCycler(P, "Tracer Origin", EC, "TracerOrigin", {"Bottom", "Center", "Top", "Mouse"})
+    cfgToggle(P, "Head Dot", EC, "HeadDot")
+    cfgToggle(P, "Skeleton", EC, "Skeleton")
+    cfgToggle(P, "Chams", EC, "Chams")
+    section(P, "FILTERS")
+    cfgToggle(P, "Team Check", EC, "TeamCheck")
+    cfgToggle(P, "Visible Check", EC, "VisibleCheck")
+    cfgToggle(P, "Rainbow", EC, "Rainbow")
+
+    -- MOVE
+    P = pages.MOVE
+    section(P, "SPEED")
+    cfgToggle(P, "Walkspeed", AC, "Walk")
+    cfgSlider(P, "Speed", AC, "WalkSpeed", 16, 200, 1, "%d")
+    cfgCycler(P, "Mode", AC, "WalkMode", {"Property", "CFrame"})
+    section(P, "MOVEMENT")
+    cfgToggle(P, "Infinite Jump", XC, "InfJump")
+    cfgToggle(P, "Noclip", XC, "Noclip")
+
+    -- GUN
+    P = pages.GUN
+    section(P, "NO RECOIL")
+    cfgToggle(P, "No Recoil", XC, "NoRecoil")
+    cfgSlider(P, "Strength", XC, "RecoilStrength", 10, 100, 1, "%d%%")
+    section(P, "SKINS (CLIENT)")
+    cfgCycler(P, "Gun Skin", XC, "Skin", EX.SkinList)
+    section(P, "TRIGGERBOT")
+    cfgToggle(P, "Triggerbot", XC, "Trigger")
+    cfgSlider(P, "Delay", XC, "TriggerDelay", 0, 300, 5, "%dms")
+    cfgToggle(P, "Team Check", XC, "TriggerTeamCheck")
+
+    -- watermark (built early so VIS can toggle it)
+    local wm = make("Frame", {
+        Size = UDim2.fromOffset(176, 22), Position = UDim2.fromOffset(12, 12),
+        BackgroundColor3 = BG, BorderSizePixel = 0, Parent = gui,
+    }, {stroke(RED)})
+    local wmText = label({
+        Size = UDim2.fromScale(1, 1), Position = UDim2.fromOffset(8, 0), TextSize = 13,
+        Text = "ryzeware | -- fps", Parent = wm,
+    })
+
+    -- VIS
+    P = pages.VIS
+    section(P, "LIGHTING")
+    cfgToggle(P, "Fullbright", XC, "Fullbright")
+    section(P, "CROSSHAIR")
+    cfgToggle(P, "Crosshair", XC, "Crosshair")
+    cfgSlider(P, "Size", XC, "CrosshairSize", 2, 30, 1, "%dpx")
+    cfgSlider(P, "Gap", XC, "CrosshairGap", 0, 20, 1, "%dpx")
+    cfgCycler(P, "Color", XC, "CrosshairColor", EX.CrossList)
+    cfgToggle(P, "Center Dot", XC, "CrosshairDot")
+    section(P, "CAMERA")
+    cfgToggle(P, "FOV Override", XC, "FovOverride")
+    cfgSlider(P, "Field of View", XC, "FovValue", 30, 120, 1, "%d deg")
+    section(P, "INTERFACE")
+    toggle(P, "Watermark", function() return ui.Watermark end, function(v) ui.Watermark = v wm.Visible = v end)
+
+    -- CFG
+    P = pages.CFG
+    local DIR, CFG_DIR = "ryzeware", "ryzeware/configs"
+    local AUTO = DIR .. "/autoload.txt"
+    local hasFS = writefile and readfile and isfile and makefolder and isfolder and listfiles
+
+    local function snapshot(cfg)
+        local out = {}
+        for k, v in pairs(cfg) do
+            local t = typeof(v)
+            if t == "boolean" or t == "number" or t == "string" then out[k] = v end
+        end
+        return out
+    end
+    local function apply(cfg, data)
+        for k, v in pairs(data or {}) do
+            if cfg[k] ~= nil and typeof(cfg[k]) == typeof(v) then cfg[k] = v end
+        end
+    end
+    local function ensure()
+        if not hasFS then return false end
+        if not isfolder(DIR) then makefolder(DIR) end
+        if not isfolder(CFG_DIR) then makefolder(CFG_DIR) end
+        return true
+    end
+    local function clean(n) return (n or ""):gsub("[^%w_%-]", ""):sub(1, 24) end
+    local function cfgPath(n) return CFG_DIR .. "/" .. n .. ".json" end
+    local function listCfgs()
+        local out = {}
+        if ensure() then
+            local ok, files = pcall(listfiles, CFG_DIR)
+            if ok then
+                for _, f in ipairs(files) do
+                    local n = f:match("([^/\\]+)%.json$")
+                    if n then out[#out + 1] = n end
+                end
+            end
+        end
+        table.sort(out)
+        return out
+    end
+    local function saveCfg(name)
+        name = clean(name)
+        if name == "" then return log("cfg: enter a name") end
+        if not ensure() then return log("cfg: no file access") end
+        local ok = pcall(writefile, cfgPath(name), HttpService:JSONEncode({
+            esp = snapshot(EC), aim = snapshot(AC), ex = snapshot(XC),
+        }))
+        log(ok and ("cfg saved: " .. name) or "cfg: save failed")
+    end
+    local function loadCfg(name)
+        name = clean(name)
+        if not (ensure() and name ~= "" and isfile(cfgPath(name))) then return log("cfg: not found") end
+        local ok, data = pcall(function() return HttpService:JSONDecode(readfile(cfgPath(name))) end)
+        if ok and type(data) == "table" then
+            apply(EC, data.esp)
+            apply(AC, data.aim)
+            apply(XC, data.ex)
+            log("cfg loaded: " .. name)
+        else
+            log("cfg: corrupt file")
+        end
+    end
+    local function deleteCfg(name)
+        name = clean(name)
+        if not (ensure() and delfile and isfile(cfgPath(name))) then return log("cfg: cannot delete") end
+        pcall(delfile, cfgPath(name))
+        log("cfg deleted: " .. name)
+    end
+
+    local autoName = "none"
+    local function readAuto()
+        if ensure() and isfile(AUTO) then
+            local ok, s = pcall(readfile, AUTO)
+            if ok then return clean(s) end
+        end
+        return ""
+    end
+
+    section(P, "CONFIG MANAGER")
+    if not hasFS then log("warning: executor has no file api") end
+
+    local nameBox
+    do
+        local row, s = rowFrame(P, 26)
+        label({Size = UDim2.fromOffset(70, 26), Position = UDim2.fromOffset(8, 0), Text = "> name", Parent = row})
+        nameBox = make("TextBox", {
+            Size = UDim2.new(1, -86, 0, 20), Position = UDim2.fromOffset(78, 3), BackgroundColor3 = BLACK,
+            BorderSizePixel = 0, Text = "default", PlaceholderText = "config name", PlaceholderColor3 = DIM,
+            TextColor3 = RED, Font = FONT, TextSize = 14, ClearTextOnFocus = false,
+            TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+        }, {stroke(DIM)})
+        nameBox.Focused:Connect(function() s.Color = RED end)
+        nameBox.FocusLost:Connect(function() s.Color = DIM nameBox.Text = clean(nameBox.Text) end)
+    end
+
+    local cfgList, selVal = listCfgs(), nil
+    do
+        local row, s = rowFrame(P, 24)
+        label({Size = UDim2.new(1, -170, 1, 0), Position = UDim2.fromOffset(8, 0), Text = "> saved", Parent = row})
+        selVal = label({
+            Size = UDim2.fromOffset(160, 24), Position = UDim2.new(1, -166, 0, 0),
+            TextXAlignment = Enum.TextXAlignment.Right, Text = #cfgList > 0 and "< click >" or "< none >", Parent = row,
+        })
+        local btn = make("TextButton", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", Parent = row})
+        hover(btn, s)
+        btn.MouseButton1Click:Connect(function()
+            cfgList = listCfgs()
+            if #cfgList == 0 then selVal.Text = "< none >" return end
+            local nxt = cfgList[(table.find(cfgList, nameBox.Text) or 0) % #cfgList + 1]
+            nameBox.Text = nxt
+            selVal.Text = "< " .. nxt .. " >"
+        end)
+    end
+
+    local autoLbl
+    do
+        local row = rowFrame(P, 22)
+        autoLbl = label({Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0), TextSize = 12, TextColor3 = MID, Parent = row})
+    end
+    local function paintAuto() autoLbl.Text = "  autoload: " .. (autoName ~= "" and autoName or "none") end
+
+    buttonRow(P, {
+        {"SAVE", function() saveCfg(nameBox.Text) end},
+        {"LOAD", function() loadCfg(nameBox.Text) end},
+        {"DELETE", function() deleteCfg(nameBox.Text) end},
+    })
+    buttonRow(P, {
+        {"SET AUTO", function()
+            local n = clean(nameBox.Text)
+            if n ~= "" and ensure() then
+                pcall(writefile, AUTO, n)
+                autoName = n
+                paintAuto()
+                log("autoload -> " .. n)
+            end
+        end},
+        {"CLEAR AUTO", function()
+            if ensure() then pcall(writefile, AUTO, "") end
+            autoName = ""
+            paintAuto()
+            log("autoload cleared")
+        end},
+    })
+    section(P, "SESSION")
+    buttonRow(P, {{"UNLOAD ALL", function() unloadAll() end}})
+
+    -- autoload on start
+    autoName = readAuto()
+    paintAuto()
+    if autoName ~= "" then
+        nameBox.Text = autoName
+        loadCfg(autoName)
+    end
+
+    -- drag
+    local dragging, dragStart, startPos = false
+    bar.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, dragStart, startPos = true, i.Position, root.Position
+        end
+    end)
+    track(UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - dragStart
+            root.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end))
+    track(UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end))
+
+    -- collapse
+    local collapsed = false
+    minBtn.MouseButton1Click:Connect(function()
+        collapsed = not collapsed
+        tabBar.Visible, area.Visible, logBox.Visible, footer.Visible =
+            not collapsed, not collapsed, not collapsed, not collapsed
+        minBtn.Text = collapsed and "[+]" or "[-]"
+        TweenService:Create(root, TweenInfo.new(0.22, Enum.EasingStyle.Quad),
+            {Size = collapsed and UDim2.fromOffset(360, HEAD) or FULL}):Play()
+    end)
+
+    -- keys: Insert hide, F6 quick save, Delete panic
+    track(UIS.InputBegan:Connect(function(i, gpe)
+        if gpe then return end
+        if i.KeyCode == Enum.KeyCode.Insert then
+            root.Visible = not root.Visible
+        elseif i.KeyCode == Enum.KeyCode.F6 then
+            saveCfg(nameBox.Text)
+        elseif i.KeyCode == Enum.KeyCode.Delete then
+            unloadAll()
+        end
+    end))
+
+    -- lifecycle
+    local destroyed, dying = false, false
+    local function destroy()
+        if destroyed then return end
+        destroyed = true
+        pcall(function() RunService:UnbindFromRenderStep("RW_GUI_STEP") end)
+        for _, c in ipairs(conns) do c:Disconnect() end
+        gui:Destroy()
+        if genv.RW_GUI and genv.RW_GUI.Destroy == destroy then genv.RW_GUI = nil end
+    end
+
+    local acc, frames, lastBlink = 0, 0, nil
+    RunService:BindToRenderStep("RW_GUI_STEP", Enum.RenderPriority.Camera.Value + 4, function(dt)
+        if genv.RW_ESP ~= ESP then
+            if not dying then
+                dying = true
+                task.defer(unloadAll)
+            end
+            return
+        end
+        for _, f in ipairs(refreshers) do f() end
+
+        local blink = math.floor(tick() * 2) % 2 == 0
+        if blink ~= lastBlink then
+            lastBlink = blink
+            title.Text = "ryzeware@urban-reload:~$ " .. (blink and "_" or " ")
+        end
+
+        acc += dt
+        frames += 1
+        if acc >= 0.25 then
+            wmText.Text = string.format("ryzeware | %d fps", math.floor(frames / acc + 0.5))
+            acc, frames = 0, 0
+        end
+    end)
+
+    genv.RW_GUI = {Destroy = destroy}
+    selectTab("AIM")
+    TweenService:Create(root, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = FULL}):Play()
+
+    task.spawn(function()
+        local boot = {
+            "ryzeware v1.1",
+            "esp: ready",
+            "aim: ready",
+            "extras: ready",
+            hookmetamethod and "silent hooks: ok" or "silent hooks: unsupported",
+            hasFS and "configs: ok" or "configs: unsupported",
+        }
+        for _, s in ipairs(boot) do
+            log(s)
+            task.wait(0.18)
+        end
+    end)
+end
